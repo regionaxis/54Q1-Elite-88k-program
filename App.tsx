@@ -1,18 +1,11 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { initializeApp, getApp, getApps } from 'firebase/app';
 import { 
-  getFirestore, 
-  doc, 
-  setDoc, 
-  onSnapshot, 
-  collection, 
-  updateDoc
+  getFirestore, doc, setDoc, onSnapshot, collection, updateDoc
 } from 'firebase/firestore';
 import type { Firestore } from 'firebase/firestore';
 import { 
-  getAuth, 
-  signInAnonymously, 
-  onAuthStateChanged
+  getAuth, signInAnonymously, onAuthStateChanged
 } from 'firebase/auth';
 import type { User, Auth } from 'firebase/auth';
 import { 
@@ -63,52 +56,62 @@ const App: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [stats, setStats] = useState<Student[]>([]);
   const [loading, setLoading] = useState(true);
-  const [isCloudMode, setIsCloudMode] = useState(!!db);
+  const [isCloudMode, setIsCloudMode] = useState(false);
+  const [cloudError, setCloudError] = useState<string | null>(null);
   const [aiInsights, setAiInsights] = useState<string>('');
   const [loadingAI, setLoadingAI] = useState(false);
 
+  // 1. Auth
   useEffect(() => {
     if (!auth) return;
-    signInAnonymously(auth).catch(console.error);
-    const unsubscribe = onAuthStateChanged(auth, (u) => setUser(u));
-    return () => unsubscribe();
+    signInAnonymously(auth).catch(err => {
+      console.error("Auth Error:", err);
+      setCloudError("驗證失敗: 請確保 Firebase 已啟用匿名登錄");
+    });
+    return onAuthStateChanged(auth, (u) => setUser(u));
   }, []);
 
+  // 2. Sync
   useEffect(() => {
-    if (db) {
-      const statsCollection = collection(db, 'artifacts', appId, 'public', 'data', 'stats');
-      const unsubscribe = onSnapshot(statsCollection, (snapshot) => {
-        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Student));
-        if (data.length === 0) {
-          INITIAL_STUDENTS.forEach(async (student) => {
-            if (db) {
-              await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'stats', student.id), {
-                name: student.name,
-                manager: student.manager,
-                totalSC: 0,
-                weeklyData: Array.from({ length: TOTAL_WEEKS }, () => ({
-                  meetings: 0, effectiveMeetings: 0, hasNewClient: false,
-                }))
-              });
-            }
-          });
-        } else {
-          const sortedData = INITIAL_STUDENTS.map(initial => {
-            const found = data.find(d => d.id === initial.id);
-            return found || { ...initial, totalSC: 0, weeklyData: [] };
-          }) as Student[];
-          setStats(sortedData);
-        }
-        setLoading(false);
-        setIsCloudMode(true);
-      }, (err) => {
-        setIsCloudMode(false);
-        loadLocalData();
-      });
-      return () => unsubscribe();
-    } else {
+    if (!db) {
       loadLocalData();
+      return;
     }
+
+    const statsCollection = collection(db, 'artifacts', appId, 'public', 'data', 'stats');
+    const unsubscribe = onSnapshot(statsCollection, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Student));
+      if (data.length === 0) {
+        INITIAL_STUDENTS.forEach(async (student) => {
+          if (db) {
+            await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'stats', student.id), {
+              name: student.name,
+              manager: student.manager,
+              totalSC: 0,
+              weeklyData: Array.from({ length: TOTAL_WEEKS }, () => ({
+                meetings: 0, effectiveMeetings: 0, hasNewClient: false,
+              }))
+            });
+          }
+        });
+      } else {
+        const sortedData = INITIAL_STUDENTS.map(initial => {
+          const found = data.find(d => d.id === initial.id);
+          return found || { ...initial, totalSC: 0, weeklyData: [] };
+        }) as Student[];
+        setStats(sortedData);
+      }
+      setLoading(false);
+      setIsCloudMode(true);
+      setCloudError(null);
+    }, (err) => {
+      console.error("Firestore Error:", err);
+      setCloudError(`同步失敗: ${err.message}`);
+      setIsCloudMode(false);
+      loadLocalData();
+    });
+
+    return () => unsubscribe();
   }, [user]);
 
   const loadLocalData = () => {
@@ -145,9 +148,13 @@ const App: React.FC = () => {
     });
     setStats(updatedStats);
     if (isCloudMode && db) {
-      const studentDoc = doc(db, 'artifacts', appId, 'public', 'data', 'stats', id);
-      const student = updatedStats.find(s => s.id === id);
-      if (student) await updateDoc(studentDoc, { totalSC: student.totalSC, weeklyData: student.weeklyData });
+      try {
+        const studentDoc = doc(db, 'artifacts', appId, 'public', 'data', 'stats', id);
+        const student = updatedStats.find(s => s.id === id);
+        if (student) await updateDoc(studentDoc, { totalSC: student.totalSC, weeklyData: student.weeklyData });
+      } catch (e) {
+        console.error("Update Error:", e);
+      }
     }
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(updatedStats));
   }, [stats, currentWeek, isCloudMode, role, selectedStudentId]);
@@ -262,7 +269,12 @@ const App: React.FC = () => {
             {role === 'admin' ? '管理員總覽' : '個人進度'}
             <button onClick={() => setRole(null)} className="text-slate-300 hover:text-red-500"><LogOut size={16}/></button>
           </h1>
-          <p className="text-slate-500 text-sm">{isCloudMode ? '🟢 雲端同步中' : '🔵 本地儲存'}</p>
+          <div className="flex flex-col">
+            <p className={`text-xs font-bold ${isCloudMode ? 'text-emerald-600' : 'text-blue-600'}`}>
+              {isCloudMode ? '🟢 雲端同步中 (Live Sync)' : '🔵 本地儲存 (Local Mode)'}
+            </p>
+            {cloudError && <p className="text-[10px] text-red-500 font-bold mt-1">{cloudError}</p>}
+          </div>
         </div>
         <div className="flex items-center gap-2 bg-white p-2 rounded-xl border">
           <button onClick={() => setCurrentWeek(Math.max(1, currentWeek - 1))}><ChevronLeft/></button>
