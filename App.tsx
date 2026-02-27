@@ -1,151 +1,272 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { initializeApp, getApp, getApps } from 'firebase/app';
-import { getFirestore, doc, setDoc, onSnapshot, collection, updateDoc } from 'firebase/firestore';
-import { getAuth, signInAnonymously } from 'firebase/auth';
 import { 
-  Users, Trophy, TrendingUp, UserPlus, ChevronRight, ChevronLeft,
-  Search, Award, AlertCircle, Loader2, Cloud, CloudOff, Sparkles,
-  Download, Upload, Save, LogOut, BarChart3, PieChart as PieChartIcon
+  getFirestore, 
+  doc, 
+  setDoc, 
+  onSnapshot, 
+  collection, 
+  updateDoc
+} from 'firebase/firestore';
+import type { Firestore } from 'firebase/firestore';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  onAuthStateChanged
+} from 'firebase/auth';
+import type { User, Auth } from 'firebase/auth';
+import { 
+  Users, 
+  Trophy, 
+  TrendingUp, 
+  UserPlus, 
+  ChevronRight, 
+  ChevronLeft,
+  Search,
+  Award,
+  AlertCircle,
+  Loader2,
+  Cloud,
+  Save,
+  Sparkles,
+  Download,
+  Upload,
+  LogOut,
+  BarChart3,
+  PieChart as PieChartIcon,
+  LayoutDashboard
 } from 'lucide-react';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, PieChart, Pie } from 'recharts';
-import { INITIAL_STUDENTS, SC_TARGET, TOTAL_WEEKS, MEETING_GOAL } from './constants';
+import { 
+  BarChart, 
+  Bar, 
+  XAxis, 
+  YAxis, 
+  CartesianGrid, 
+  Tooltip, 
+  ResponsiveContainer, 
+  Cell,
+  PieChart,
+  Pie
+} from 'recharts';
+import { 
+  INITIAL_STUDENTS, 
+  SC_TARGET, 
+  TOTAL_WEEKS, 
+  MEETING_GOAL, 
+  WEEK_DATES 
+} from './constants';
+import { Student, ProcessedStudent } from './types';
+import { getAIInsights } from './services/geminiService';
 
-const firebaseConfig = {
-  apiKey: "AIzaSyBd-09Iw2nWR3zazM5TdswBSoxqWY-uYDg",
-  authDomain: "q188000.firebaseapp.com",
-  projectId: "q188000",
-  storageBucket: "q188000.firebasestorage.app",
-  messagingSenderId: "458229118195",
-  appId: "1:458229118195:web:7961cdaaedabe53b853386",
-  measurementId: "G-CJ5FZWLS13"
+const getFirebaseConfig = () => {
+  return {
+    apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyBd-09Iw2nWR3zazM5TdswBSoxqWY-uYDg",
+    authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "q188000.firebaseapp.com",
+    projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "q188000",
+    storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "q188000.firebasestorage.app",
+    messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "458229118195",
+    appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:458229118195:web:7961cdaaedabe53b853386",
+    measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID || "G-CJ5FZWLS13"
+  };
 };
 
-const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
-const db = getFirestore(app);
-const auth = getAuth(app);
+const fConfig = getFirebaseConfig();
+let db: Firestore | null = null;
+let auth: Auth | null = null;
+
+if (fConfig) {
+  try {
+    const app = !getApps().length ? initializeApp(fConfig) : getApp();
+    db = getFirestore(app);
+    auth = getAuth(app);
+  } catch (e) {
+    console.error("Firebase Init Error:", e);
+  }
+}
+
+const appId = (window as any).__app_id || 'q1-sprint-v1';
+const LOCAL_STORAGE_KEY = `q1_sprint_data_${appId}`;
 
 const App: React.FC = () => {
+  const [user, setUser] = useState<User | null>(null);
   const [role, setRole] = useState<'admin' | 'candidate' | null>(null);
   const [selectedStudentId, setSelectedStudentId] = useState<string | null>(null);
+  const [viewingStudentId, setViewingStudentId] = useState<string | null>(null);
   const [currentWeek, setCurrentWeek] = useState(1);
   const [searchTerm, setSearchTerm] = useState('');
-  const [stats, setStats] = useState<any[]>([]);
+  const [stats, setStats] = useState<Student[]>([]);
   const [loading, setLoading] = useState(true);
-  const [isCloudMode, setIsCloudMode] = useState(false);
+  const [isCloudMode, setIsCloudMode] = useState(!!db);
+  const [aiInsights, setAiInsights] = useState<string>('');
+  const [loadingAI, setLoadingAI] = useState(false);
 
   useEffect(() => {
+    if (!auth) return;
     signInAnonymously(auth).catch(console.error);
-    const unsubscribe = onSnapshot(collection(db, 'stats'), (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      if (data.length === 0) {
-        INITIAL_STUDENTS.forEach(async (s) => {
-          await setDoc(doc(db, 'stats', s.id), {
-            name: s.name, manager: s.manager, totalSC: 0,
-            weeklyData: Array.from({ length: 8 }, () => ({ meetings: 0, effectiveMeetings: 0, hasNewClient: false }))
-          });
-        });
-      } else {
-        const sorted = INITIAL_STUDENTS.map(i => data.find(d => d.id === i.id) || { ...i, totalSC: 0, weeklyData: [] });
-        setStats(sorted);
-      }
-      setIsCloudMode(true);
-      setLoading(false);
-    }, () => {
-      setIsCloudMode(false);
-      setLoading(false);
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
     });
     return () => unsubscribe();
   }, []);
 
+  useEffect(() => {
+    if (db) {
+      const statsCollection = collection(db, 'artifacts', appId, 'public', 'data', 'stats');
+      const unsubscribe = onSnapshot(statsCollection, (snapshot) => {
+        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Student));
+        if (data.length === 0) {
+          INITIAL_STUDENTS.forEach(async (student) => {
+            if (db) {
+              await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'stats', student.id), {
+                name: student.name,
+                manager: student.manager,
+                totalSC: 0,
+                weeklyData: Array.from({ length: TOTAL_WEEKS }, () => ({
+                  meetings: 0,
+                  effectiveMeetings: 0,
+                  hasNewClient: false,
+                }))
+              });
+            }
+          });
+        } else {
+          const sortedData = INITIAL_STUDENTS.map(initial => {
+            const found = data.find(d => d.id === initial.id);
+            return found || { ...initial, totalSC: 0, weeklyData: [] };
+          }) as Student[];
+          setStats(sortedData);
+        }
+        setLoading(false);
+        setIsCloudMode(true);
+      }, (err) => {
+        console.warn("Firestore access restricted, switching to Local Mode:", err);
+        setIsCloudMode(false);
+        loadLocalData();
+      });
+      return () => unsubscribe();
+    } else {
+      loadLocalData();
+    }
+  }, [user]);
+
+  const loadLocalData = () => {
+    const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
+    if (saved) {
+      setStats(JSON.parse(saved));
+    } else {
+      const initial = INITIAL_STUDENTS.map(s => ({
+        ...s,
+        totalSC: 0,
+        weeklyData: Array.from({ length: TOTAL_WEEKS }, () => ({
+          meetings: 0,
+          effectiveMeetings: 0,
+          hasNewClient: false,
+        }))
+      }));
+      setStats(initial);
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(initial));
+    }
+    setLoading(false);
+    setIsCloudMode(false);
+  };
+
   const updateStat = useCallback(async (id: string, field: string, value: any) => {
     if (role === 'candidate' && selectedStudentId !== id) return;
-    const updated = stats.map(s => {
+
+    const updatedStats = stats.map(s => {
       if (s.id !== id) return s;
       const newS = { ...s };
-      if (field === 'totalSC') newS.totalSC = Math.max(0, Number(value)) || 0;
-      else {
+      if (field === 'totalSC') {
+        newS.totalSC = Math.max(0, Number(value)) || 0;
+      } else {
         const newWeekly = [...(newS.weeklyData || [])];
-        const target = { ...newWeekly[currentWeek - 1] };
-        if (field === 'hasNewClient') target.hasNewClient = value;
-        else (target as any)[field] = Math.max(0, Number(value)) || 0;
-        newWeekly[currentWeek - 1] = target;
+        const targetWeekData = { ...newWeekly[currentWeek - 1] };
+        if (field === 'hasNewClient') {
+          targetWeekData.hasNewClient = value;
+        } else {
+          (targetWeekData as any)[field] = Math.max(0, Number(value)) || 0;
+        }
+        newWeekly[currentWeek - 1] = targetWeekData;
         newS.weeklyData = newWeekly;
       }
       return newS;
     });
-    setStats(updated);
-    if (isCloudMode) {
-      const s = updated.find(x => x.id === id);
-      await updateDoc(doc(db, 'stats', id), { totalSC: s.totalSC, weeklyData: s.weeklyData });
+
+    setStats(updatedStats);
+
+    if (isCloudMode && db) {
+      try {
+        const studentDoc = doc(db, 'artifacts', appId, 'public', 'data', 'stats', id);
+        const student = updatedStats.find(s => s.id === id);
+        if (student) {
+          await updateDoc(studentDoc, { 
+            totalSC: student.totalSC, 
+            weeklyData: student.weeklyData 
+          });
+        }
+      } catch (e) {
+        console.error("Cloud update failed, syncing to local:", e);
+      }
     }
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(updatedStats));
   }, [stats, currentWeek, isCloudMode, role, selectedStudentId]);
 
-  const processed = useMemo(() => stats.map(s => ({
-    ...s,
-    cumulativeEffective: s.weeklyData?.reduce((sum: number, w: any) => sum + (Number(w.effectiveMeetings) || 0), 0) || 0,
-    isAchiever: (s.totalSC || 0) >= SC_TARGET
-  })), [stats]);
+  const processedStats = useMemo<ProcessedStudent[]>(() => {
+    return stats.map(student => {
+      const cumulativeEffective = student.weeklyData?.reduce((sum, w) => sum + (Number(w.effectiveMeetings) || 0), 0) || 0;
+      return {
+        ...student,
+        cumulativeEffective,
+        isAchiever: (student.totalSC || 0) >= SC_TARGET
+      };
+    });
+  }, [stats]);
 
-  const filtered = useMemo(() => {
-    if (role === 'candidate' && selectedStudentId) return processed.filter(s => s.id === selectedStudentId);
-    return processed.filter(s => s.name.toLowerCase().includes(searchTerm.toLowerCase()));
-  }, [processed, searchTerm, role, selectedStudentId]);
-
-  if (loading) return <div className="min-h-screen flex items-center justify-center"><Loader2 className="animate-spin" /></div>;
-
-  if (!role) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-        <div className="max-w-md w-full bg-white rounded-3xl shadow-xl p-8">
-          <h1 className="text-2xl font-black text-center mb-8">Q1 衝刺計劃</h1>
-          <button onClick={() => setRole('admin')} className="w-full py-4 bg-slate-900 text-white rounded-2xl font-black mb-4">管理員入口</button>
-          <div className="space-y-2 max-h-60 overflow-y-auto">
-            {INITIAL_STUDENTS.map(s => (
-              <button key={s.id} onClick={() => { setRole('candidate'); setSelectedStudentId(s.id); }} className="w-full p-3 border rounded-xl text-left hover:bg-blue-50">
-                <p className="font-bold">{s.name}</p>
-                <p className="text-xs text-slate-400">{s.manager}</p>
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
+  const filteredStats = useMemo(() => {
+    if (role === 'candidate' && selectedStudentId) {
+      return processedStats.filter(s => s.id === selectedStudentId);
+    }
+    return processedStats.filter(s => 
+      s.name?.toLowerCase().includes(searchTerm.toLowerCase()) || 
+      s.manager?.toLowerCase().includes(searchTerm.toLowerCase())
     );
-  }
+  }, [processedStats, searchTerm, role, selectedStudentId]);
 
-  return (
-    <div className="min-h-screen bg-slate-50 p-4 md:p-8">
-      <header className="max-w-7xl mx-auto mb-8 flex justify-between items-center">
-        <div>
-          <h1 className="text-2xl font-black">{role === 'admin' ? '管理員總覽' : '個人進度'}</h1>
-          <p className="text-xs font-bold text-emerald-600">{isCloudMode ? '● 雲端同步中' : '● 離線模式'}</p>
-        </div>
-        <button onClick={() => setRole(null)} className="p-2 bg-white border rounded-xl"><LogOut size={16}/></button>
-      </header>
-      <main className="max-w-7xl mx-auto bg-white rounded-3xl border overflow-hidden">
-        <table className="w-full text-left">
-          <thead className="bg-slate-50 text-[10px] font-black uppercase">
-            <tr><th className="p-4">學員</th><th className="p-4">累積 SC</th><th className="p-4">本週面談</th><th className="p-4">進度</th></tr>
-          </thead>
-          <tbody>
-            {filtered.map(s => {
-              const week = s.weeklyData?.[currentWeek-1] || {meetings:0, effectiveMeetings:0};
-              return (
-                <tr key={s.id} className="border-t">
-                  <td className="p-4 font-bold text-sm">{s.name}</td>
-                  <td className="p-4"><input type="number" className="w-24 p-2 border rounded-lg" value={s.totalSC} onChange={(e)=>updateStat(s.id, 'totalSC', e.target.value)}/></td>
-                  <td className="p-4 flex gap-1">
-                    <input type="number" className="w-12 p-2 border rounded-lg" value={week.meetings} onChange={(e)=>updateStat(s.id, 'meetings', e.target.value)}/>
-                    <input type="number" className="w-12 p-2 border border-blue-200 bg-blue-50 rounded-lg font-bold" value={week.effectiveMeetings} onChange={(e)=>updateStat(s.id, 'effectiveMeetings', e.target.value)}/>
-                  </td>
-                  <td className="p-4"><div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden"><div className="bg-blue-500 h-full" style={{width: `${(s.cumulativeEffective/20)*100}%`}}/></div></td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </main>
-    </div>
-  );
-};
+  const chartData = useMemo(() => {
+    return processedStats
+      .sort((a, b) => (b.totalSC || 0) - (a.totalSC || 0))
+      .slice(0, 10)
+      .map(s => ({
+        name: s.name,
+        sc: s.totalSC || 0,
+        meetings: s.cumulativeEffective
+      }));
+  }, [processedStats]);
 
-export default App;
+  const managerData = useMemo(() => {
+    const managers: Record<string, { name: string, totalSC: number, count: number }> = {};
+    processedStats.forEach(s => {
+      if (!managers[s.manager]) {
+        managers[s.manager] = { name: s.manager, totalSC: 0, count: 0 };
+      }
+      managers[s.manager].totalSC += (s.totalSC || 0);
+      managers[s.manager].count += 1;
+    });
+    return Object.values(managers).sort((a, b) => b.totalSC - a.totalSC);
+  }, [processedStats]);
+
+  const fetchAIInsights = async () => {
+    setLoadingAI(true);
+    const insights = await getAIInsights(processedStats, currentWeek);
+    setAiInsights(insights || '');
+    setLoadingAI(false);
+  };
+
+  const exportCSV = () => {
+    const headers = ["Name", "Manager", "Total SC", "Effective Meetings", "Goal Met"];
+    const rows = processedStats.map(s => [s.name, s.manager, s.totalSC, s.cumulativeEffective, s.isAchiever ? "YES" : "NO"]);
+    const csvContent = [headers, ...rows].map(e => e.join(",")).join("\n");
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href",
