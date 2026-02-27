@@ -2,7 +2,8 @@ import { GoogleGenAI } from "@google/genai";
 import { ProcessedStudent } from "../types";
 
 export const getAIInsights = async (stats: ProcessedStudent[], currentWeek: number) => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  // Always use the API key exclusively from process.env.GEMINI_API_KEY and initialize with a named parameter.
+  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   
   const statsSummary = stats.map(s => ({
     name: s.name,
@@ -23,10 +24,12 @@ export const getAIInsights = async (stats: ProcessedStudent[], currentWeek: numb
   `;
 
   try {
+    // Call generateContent with both model name and prompt directly.
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
       contents: prompt,
     });
+    // Access the .text property directly (do not call it as a function).
     return response.text;
   } catch (error) {
     console.error("AI Insights Error:", error);
